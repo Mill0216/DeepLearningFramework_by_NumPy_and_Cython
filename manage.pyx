@@ -3,15 +3,12 @@ cimport cython
 import numpy as np
 cimport numpy as np
 import copy
-
-from Layers import *
-from Optimizers import *
+import json
 
 ctypedef np.float_t nf64
 ctypedef np.ndarray na
 
-#managerクラスに層(重み含)やオプティマイザの情報を入れる。
-#層以外は好きな時に変えれるようにしたいね。
+
 
 cdef class manager():
     cdef int i_ndim, o_ndim
@@ -19,36 +16,30 @@ cdef class manager():
     cdef optimizer, loss_func
     
     def __init__(self, list input_size, 
-                 list layers, optimizer, update_freq, loss_func):
-        self.layers = []
-        for layer_info in layers:
-            options = layer_info.split('_')
-            exec('layer = {}({})'.format(options[0], options[1]), globals())
-            self.layers.append(layer)
-        
-        options = optimizer.split('_')
-        exec('_optimizer = {}({})'.format(options[0], options[1]), globals())
-        exec('_loss_func = {}()'.format(loss_func), globals())
+                 list _layers, _optimizer, _loss_func):
+        self.layers = _layers
         self.optimizer = _optimizer
         self.loss_func = _loss_func
         self.layer_setup(input_size)
     cdef layer_setup(self, list input_size):
         cdef list pre_output = input_size
+        cdef int i = 0
         for layer in self.layers:
+            pre_output = layer.set_params(pre_output, i)
+            i += 1
             if layer.not_activation:
-                pre_output = layer.set_params(pre_output)
                 layer.set_optimizer(copy.copy(self.optimizer))
         self.loss_func.set_params(pre_output)
             
-    cpdef double train_online(self, list x_data, list y_data):
+    cpdef double train_online(self, list x_data, list y_data, parent_directory):
         cdef list losses = []
         cdef int data_size = len(x_data)
-        #cython、zip使えない説(forのコンマでコンパイルエラー)
         for i in range(data_size):
             x = x_data[i]
             y = y_data[i]
             losses.append(self.loss_calc(self.forward(x), y))
             self.backward()
+        self.save_parameters(10, parent_directory)
         return sum(losses)/data_size
             
     cpdef double train_batch(self, list x_data, list y_data):
@@ -85,5 +76,30 @@ cdef class manager():
         cdef na delta = self.loss_func.backward()
         for layer in self.layers[::-1]:
              delta = layer.backward(delta)
+
+    def save_parameters(self, int epoch, parent_directory):
+        save_dictionary = {}
+        for layer in self.layers:
+            layer_info = {}
+            if layer.not_activation:
+                layer_info['weights'] = list(layer.weights.flatten())
+                layer_info['biases'] = list(layer.biases)
+                if self.optimizer.__class__.__name__ != 'SGD':
+                    layer_info['opt_weights'] = list(layer.optimizer.weights.flatten())
+                    layer_info['opt_biases'] = list(layer.optimizer.biases)
+            save_dictionary[str(layer.layer_id)] = layer_info
+        with open('{}/epoch{}.json'.format(parent_directory, epoch), 'w') as f:
+            json.dump(save_dictionary, f)
+            
+    def load_parameters(self, int epoch, parent_directory):
+        with open('{}/epoch{}.json'.format(parent_directory, epoch), 'r') as f:
+            save_dictionary = json.load(f)
+        for i, layer in enumerate(self.layers):
+            if layer.not_activation:
+                layer_info = save_dictionary[str(i)]
+                layer.weights = np.array(layer_info['weights']).reshape(layer.weights.shape)
+                layer.biases = np.array(layer_info['biases']).reshape(layer.biases.shape)
+                layer.optimizer.weights = np.array(layer_info['opt_weights']).reshape(layer.weights.shape)
+                layer.optimizer.biases = np.array(layer_info['opt_biases']).reshape(layer.biases.shape)
                 
     pass
